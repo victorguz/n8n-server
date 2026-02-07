@@ -1,65 +1,221 @@
 services:
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - N8N_HOST=${N8N_HOST}
+      - N8N_PORT=${N8N_PORT}
+      - N8N_PROTOCOL=https
+      # Database
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_USER=${POSTGRES_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      # Configuration
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - N8N_PERSONALIZATION_ENABLED=true
+      - N8N_ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - N8N_USER_MANAGEMENT_JWT_SECRET
+      - N8N_SECURE_COOKIE=true
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=true
+      - N8N_PROXY_HOPS=${PROXY_HOPS:-1}
+      - WEBHOOK_URL=https://${N8N_HOST}/
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+      - N8N_TEMPLATES_ENABLED=true
+      - N8N_HIRING_BANNER_ENABLED=false
+      - OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true
+      # Ollama
+      - OLLAMA_HOST=${OLLAMA_HOST:-ollama:11434}
+      # Runners
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_RUNNERS_MODE=external
+      - N8N_RUNNERS_BROKER_LISTEN_ADDRESS=0.0.0.0
+      - N8N_RUNNERS_AUTH_TOKEN=${N8N_RUNNERS_SECRET}
+      - N8N_NATIVE_PYTHON_RUNNER=true
+      - N8N_RUNNERS_MAX_CONCURRENCY=50
+      # Logging
+      - EXECUTIONS_DATA_PRUNE=true
+      - EXECUTIONS_DATA_MAX_AGE=7
+      # Redis
+      - EXECUTIONS_MODE=queue
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_PORT=6379
+      # Emails
+      # - N8N_SMTP_HOST=${SMTP_HOST}
+      # - N8N_SMTP_PORT=${SMTP_PORT}
+      # - N8N_SMTP_USER=${SMTP_USER}
+      # - N8N_SMTP_PASS=${SMTP_PASS}
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  n8n-worker:
+    image: docker.n8n.io/n8nio/n8n:latest
+    restart: always
+    command: worker
+    environment:
+      - NODE_ENV=production
+      - N8N_HOST=${N8N_HOST}
+      - N8N_PORT=${N8N_PORT}
+      - N8N_PROTOCOL=https
+      - EXECUTIONS_MODE=queue
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_USER=${POSTGRES_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - N8N_ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - N8N_SECURE_COOKIE=true
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=true
+      - N8N_PROXY_HOPS=${PROXY_HOPS}
+      - WEBHOOK_URL=https://${N8N_HOST}/
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_PORT=6379
+    depends_on:
+      - n8n
+      - redis
+
+  n8n-runner:
+    image: n8nio/runners:nightly
+    restart: always
+    environment:
+      - N8N_RUNNERS_TASK_BROKER_URI=http://n8n:5679
+      - N8N_RUNNERS_AUTH_TOKEN=${N8N_RUNNERS_SECRET}
+      - N8N_ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+      - N8N_RUNNERS_MAX_CONCURRENCY=50
+    depends_on:
+      - n8n
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_storage:/home/node/.ollama
+
+  init-ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_storage:/home/node/.ollama
+    entrypoint: /bin/sh
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    command:
+      - "-c"
+      - "sleep 3; ollama pull llama3.2:latest; ollama pull gemma3:latest"
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis_storage:/data
+
   postgres:
     image: postgres:17-alpine
+    hostname: postgres
     restart: unless-stopped
     environment:
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_storage:/var/lib/postgresql/data
     healthcheck:
-      test:
-        - CMD-SHELL
-        - pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}
-      start_period: 30s
-      interval: 10s
+      test: ['CMD-SHELL', 'pg_isready -h localhost -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 5s
       timeout: 5s
-      retries: 5
-    networks:
-      - n8n-n8nwithpostgres-y34tv0
-  n8n:
-    image: n8nio/n8n:latest
+      retries: 10
+
+  chatwoot:
+    image: chatwoot/chatwoot:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - RAILS_ENV=production
+      - SECRET_KEY_BASE=${CHATWOOT_SECRET_KEY_BASE}
+      - FRONTEND_URL=${CHATWOOT_FRONTEND_URL:-http://localhost:3000}
+      - FORCE_SSL=false
+      - POSTGRES_HOST=chatwoot_postgres
+      - POSTGRES_USERNAME=${CHATWOOT_POSTGRES_USER:-chatwoot}
+      - POSTGRES_PASSWORD=${CHATWOOT_POSTGRES_PASSWORD}
+      - POSTGRES_DATABASE=${CHATWOOT_POSTGRES_DB:-chatwoot}
+      - REDIS_URL=redis://redis:6379
+      - REDIS_OPENSSL_VERIFY_MODE=none
+      - ACTIVE_STORAGE_SERVICE=local
+      - ACTIVE_STORAGE_LOCAL_PATH=/app/storage
+      - RAILS_MAX_THREADS=5
+      - WEB_CONCURRENCY=2
+      - ENABLE_ACCOUNT_SIGNUP=true
+      - INSTALLATION_NAME=Chatwoot
+      - INSTALLATION_VERSION=latest
+    volumes:
+      - chatwoot_storage:/app/storage
+      - chatwoot_public:/app/public
+    depends_on:
+      chatwoot_postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: bundle exec rails s -p 3000 -b 0.0.0.0
+
+  chatwoot_sidekiq:
+    image: chatwoot/chatwoot:latest
     restart: unless-stopped
     environment:
-      - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_HOST=postgres
-      - DB_POSTGRESDB_PORT=5432
-      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
-      - DB_POSTGRESDB_USER=${POSTGRES_USER}
-      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
-      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
-      - N8N_HOST=${N8N_HOST}
-      - N8N_PORT=${N8N_PORT}
-      - N8N_PROTOCOL=http
-      - NODE_ENV=production
-      - WEBHOOK_URL=https://${N8N_HOST}/
-      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
-      - N8N_SECURE_COOKIE=false
-      - NODE_FUNCTION_ALLOW_EXTERNAL=*
+      - RAILS_ENV=production
+      - SECRET_KEY_BASE=${CHATWOOT_SECRET_KEY_BASE}
+      - POSTGRES_HOST=chatwoot_postgres
+      - POSTGRES_USERNAME=${CHATWOOT_POSTGRES_USER:-chatwoot}
+      - POSTGRES_PASSWORD=${CHATWOOT_POSTGRES_PASSWORD}
+      - POSTGRES_DATABASE=${CHATWOOT_POSTGRES_DB:-chatwoot}
+      - REDIS_URL=redis://redis:6379
+      - REDIS_OPENSSL_VERIFY_MODE=none
+      - ACTIVE_STORAGE_SERVICE=local
+      - ACTIVE_STORAGE_LOCAL_PATH=/app/storage
     volumes:
-      - n8n_data:/home/node/.n8n
+      - chatwoot_storage:/app/storage
+      - chatwoot_public:/app/public
     depends_on:
-      postgres:
+      chatwoot_postgres:
         condition: service_healthy
-    networks:
-      - n8n-n8nwithpostgres-y34tv0
-    labels:
-      - traefik.http.routers.n8n-n8nwithpostgres-y34tv0-1-web.rule=Host(`n8n.solaradev.com`)
-      - traefik.http.routers.n8n-n8nwithpostgres-y34tv0-1-web.entrypoints=web
-      - traefik.http.services.n8n-n8nwithpostgres-y34tv0-1-web.loadbalancer.server.port=5678
-      - traefik.http.routers.n8n-n8nwithpostgres-y34tv0-1-web.service=n8n-n8nwithpostgres-y34tv0-1-web
-      - traefik.http.routers.n8n-n8nwithpostgres-y34tv0-1-web.middlewares=redirect-to-https@file
-      - traefik.http.routers.n8n-n8nwithpostgres-y34tv0-1-websecure.rule=Host(`n8n.solaradev.com`)
-      - traefik.http.routers.n8n-n8nwithpostgres-y34tv0-1-websecure.entrypoints=websecure
-      - traefik.http.services.n8n-n8nwithpostgres-y34tv0-1-websecure.loadbalancer.server.port=5678
-      - traefik.http.routers.n8n-n8nwithpostgres-y34tv0-1-websecure.service=n8n-n8nwithpostgres-y34tv0-1-websecure
-      - traefik.http.routers.n8n-n8nwithpostgres-y34tv0-1-websecure.tls.certresolver=letsencrypt
-      - traefik.enable=true
+      redis:
+        condition: service_healthy
+    command: bundle exec sidekiq -C config/sidekiq.yml
+
+  chatwoot_postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${CHATWOOT_POSTGRES_USER:-chatwoot}
+      - POSTGRES_PASSWORD=${CHATWOOT_POSTGRES_PASSWORD}
+      - POSTGRES_DB=${CHATWOOT_POSTGRES_DB:-chatwoot}
+    volumes:
+      - chatwoot_postgres_storage:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${CHATWOOT_POSTGRES_USER:-chatwoot}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
-  n8n_data: null
-  postgres_data: null
-networks:
-  n8n-n8nwithpostgres-y34tv0:
-    name: n8n-n8nwithpostgres-y34tv0
-    external: true
+  n8n_data:
+  postgres_storage:
+  ollama_storage:
+  redis_storage:
+  chatwoot_storage:
+  chatwoot_public:
+  chatwoot_postgres_storage:
